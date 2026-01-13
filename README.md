@@ -1,6 +1,8 @@
 # Zip2Rep - Find Your Representative
 
-A frontend-only web application that helps users find their Member of Parliament (MP) or representative by entering their country and postal/zip code. Can be hosted on GitHub Pages or any static hosting service.
+**🌐 [Visit the Live Website →](https://jadijadi.github.io/zip2rep/)**
+
+Zip2Rep is a frontend-only web application that helps users find their Member of Parliament (MP) or representative by entering their country and postal/zip code. If you're just looking to use the website, [visit the live version here](https://jadijadi.github.io/zip2rep/). This repository contains the source code for developers who want to contribute, deploy their own instance, or understand how it works.
 
 ## Features
 
