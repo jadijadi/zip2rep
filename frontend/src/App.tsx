@@ -1,32 +1,13 @@
 import { useState, useEffect } from 'react'
 import './App.css'
-
-interface ContactInfo {
-  name: string
-  role: string
-  email?: string
-  phone?: string
-  website?: string
-  address?: string
-  party?: string
-  riding?: string
-  district?: string
-}
-
-interface LookupResponse {
-  country: string
-  postal_code: string
-  representatives: ContactInfo[]
-  source?: string
-}
+import { lookupMP, getSupportedCountries, type LookupResponse } from './services/lookup'
+import type { ContactInfo } from './types'
 
 interface Country {
   code: string
   name: string
   format: string
 }
-
-const API_BASE = '/api'
 
 function App() {
   const [country, setCountry] = useState<string>('')
@@ -37,35 +18,8 @@ function App() {
   const [countries, setCountries] = useState<Country[]>([])
 
   useEffect(() => {
-    // Fetch supported countries
-    fetch(`${API_BASE}/countries`)
-      .then(res => {
-        if (!res.ok) {
-          throw new Error(`HTTP error! status: ${res.status}`)
-        }
-        return res.json()
-      })
-      .then(data => {
-        console.log('Countries data:', data) // Debug log
-        if (data && data.countries) {
-          setCountries(data.countries)
-        } else {
-          console.error('Invalid countries data format:', data)
-          // Fallback to hardcoded countries if API fails
-          setCountries([
-            { code: "CA", name: "Canada", format: "Postal Code (e.g., K1A 0A6)" },
-            { code: "US", name: "United States", format: "Zip Code (e.g., 10001)" },
-          ])
-        }
-      })
-      .catch(err => {
-        console.error('Failed to fetch countries:', err)
-        // Fallback to hardcoded countries if API fails
-        setCountries([
-          { code: "CA", name: "Canada", format: "Postal Code (e.g., K1A 0A6)" },
-          { code: "US", name: "United States", format: "Zip Code (e.g., 10001)" },
-        ])
-      })
+    // Get supported countries from local service
+    setCountries(getSupportedCountries())
   }, [])
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -75,23 +29,7 @@ function App() {
     setLoading(true)
 
     try {
-      const response = await fetch(`${API_BASE}/lookup`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          country: country,
-          postal_code: postalCode,
-        }),
-      })
-
-      const data = await response.json()
-
-      if (!response.ok) {
-        throw new Error(data.detail || 'Failed to lookup MP')
-      }
-
+      const data = await lookupMP(country, postalCode)
       setResults(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred')
