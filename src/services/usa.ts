@@ -43,17 +43,64 @@ export async function lookupUSARepresentative(zipCode: string): Promise<ContactI
 
   const representatives: ContactInfo[] = []
 
+  // Helper function to fetch with CORS proxy fallback
+  const fetchWithProxy = async (url: string): Promise<Response> => {
+    try {
+      // Try direct fetch first
+      const response = await fetch(url, {
+        method: 'GET',
+        mode: 'cors',
+        credentials: 'omit',
+      })
+      // Check if response is actually ok (not blocked by CORS)
+      if (response.ok || response.status !== 0) {
+        return response
+      }
+      throw new Error('CORS blocked')
+    } catch (error: any) {
+      // If CORS fails, try using a CORS proxy
+      if (
+        error.message?.includes('Failed to fetch') ||
+        error.message?.includes('CORS blocked') ||
+        error.name === 'TypeError' ||
+        error.message?.includes('network')
+      ) {
+        // Use allorigins.win as a free CORS proxy
+        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`
+        const proxyResponse = await fetch(proxyUrl, {
+          method: 'GET',
+          mode: 'cors',
+        })
+
+        if (proxyResponse.ok) {
+          const proxyData = await proxyResponse.json()
+          // allorigins returns the content in a 'contents' field as a string
+          // Parse it if it's JSON, otherwise return as-is
+          let contents = proxyData.contents
+          try {
+            contents = JSON.parse(contents)
+          } catch {
+            // If not JSON, keep as string
+          }
+          // Create a mock Response object that works like a real response
+          return new Response(JSON.stringify(contents), {
+            status: 200,
+            statusText: 'OK',
+            headers: { 'Content-Type': 'application/json' },
+          }) as Response
+        }
+      }
+      throw error
+    }
+  }
+
   // Try Whoismyrepresentative.com API first
   try {
     const apiUrl = new URL('https://whoismyrepresentative.com/getall_mems.php')
     apiUrl.searchParams.set('zip', normalizedZip)
     apiUrl.searchParams.set('output', 'json')
 
-    const response = await fetch(apiUrl.toString(), {
-      method: 'GET',
-      mode: 'cors',
-      credentials: 'omit',
-    })
+    const response = await fetchWithProxy(apiUrl.toString())
 
     if (response.ok) {
       let data: any
@@ -203,11 +250,7 @@ export async function lookupUSARepresentative(zipCode: string): Promise<ContactI
         const fivecallsUrl = new URL('https://api.5calls.org/v1/reps')
         fivecallsUrl.searchParams.set('zip', normalizedZip)
 
-        const fallbackResponse = await fetch(fivecallsUrl.toString(), {
-          method: 'GET',
-          mode: 'cors',
-          credentials: 'omit',
-        })
+        const fallbackResponse = await fetchWithProxy(fivecallsUrl.toString())
 
         if (fallbackResponse.ok) {
           const fallbackData = await fallbackResponse.json()
