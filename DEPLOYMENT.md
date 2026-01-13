@@ -12,13 +12,13 @@ This project is configured to deploy to GitHub Pages automatically using GitHub 
 
 ## Base Path Configuration
 
-The app is configured with base path `/zip2mp/` by default. This means:
-- Repository name: `zip2mp`
-- GitHub Pages URL: `https://yourusername.github.io/zip2mp/`
+The app is configured with base path `/zip2rep/` by default. This means:
+- Repository name: `zip2rep`
+- GitHub Pages URL: `https://yourusername.github.io/zip2rep/`
 
 ### To Change the Base Path
 
-1. Edit `frontend/vite.config.ts`
+1. Edit `vite.config.ts`
 2. Change the `base` property:
    ```typescript
    base: '/your-repo-name/',  // For subdirectory
@@ -65,3 +65,14 @@ All APIs used support CORS and work from the browser. If you see CORS errors:
 - Check GitHub Actions logs for specific errors
 - Ensure Node.js version is compatible (18+)
 - Verify all dependencies are installed correctly
+
+## Local Testing
+
+Before deploying, test locally:
+
+```bash
+npm install
+npm run dev
+```
+
+Visit `http://localhost:5173` to test the application.

@@ -1,4 +1,4 @@
-# Zip2MP - Find Your Member of Parliament
+# Zip2Rep - Find Your Representative
 
 A frontend-only web application that helps users find their Member of Parliament (MP) or representative by entering their country and postal/zip code. Can be hosted on GitHub Pages or any static hosting service.
 
@@ -20,31 +20,25 @@ A frontend-only web application that helps users find their Member of Parliament
 
 ### Local Development
 
-1. Navigate to the frontend directory:
-```bash
-cd frontend
-```
-
-2. Install dependencies:
+1. Install dependencies:
 ```bash
 npm install
 ```
 
-3. Start the development server:
+2. Start the development server:
 ```bash
 npm run dev
 ```
 
-The frontend will be available at `http://localhost:5173`
+The app will be available at `http://localhost:5173`
 
 ### Building for Production
 
 ```bash
-cd frontend
 npm run build
 ```
 
-The built files will be in `frontend/dist/`
+The built files will be in `dist/`
 
 ## Deployment to GitHub Pages
 
@@ -59,17 +53,16 @@ The built files will be in `frontend/dist/`
 
 1. Build the project:
 ```bash
-cd frontend
 npm run build
 ```
 
-2. Copy the contents of `frontend/dist/` to your GitHub Pages branch (usually `gh-pages`)
+2. Copy the contents of `dist/` to your GitHub Pages branch (usually `gh-pages`)
 
 ### Base Path Configuration
 
-If your repository name is `zip2mp`, the app is configured to work at `https://yourusername.github.io/zip2mp/`.
+If your repository name is `zip2rep`, the app is configured to work at `https://yourusername.github.io/zip2rep/`.
 
-To change the base path, edit `frontend/vite.config.ts`:
+To change the base path, edit `vite.config.ts`:
 - For root domain: `base: '/'`
 - For subdirectory: `base: '/your-repo-name/'`
 
@@ -94,21 +87,22 @@ All APIs are called directly from the browser. No backend server is needed.
 ## Project Structure
 
 ```
-zip2mp/
-├── frontend/
-│   ├── src/
-│   │   ├── App.tsx              # Main React component
-│   │   ├── services/
-│   │   │   ├── lookup.ts       # Main lookup router
-│   │   │   ├── canada.ts       # Canada MP lookup service
-│   │   │   └── usa.ts          # US representative lookup service
-│   │   └── main.tsx            # Entry point
-│   ├── public/
-│   │   └── .nojekyll           # GitHub Pages config
-│   └── package.json
+zip2rep/
+├── src/
+│   ├── App.tsx                  # Main React component
+│   ├── services/
+│   │   ├── lookup.ts           # Main lookup router
+│   │   ├── canada.ts           # Canada MP lookup service
+│   │   └── usa.ts              # US representative lookup service
+│   ├── types.ts                # Shared TypeScript types
+│   └── main.tsx                # Entry point
+├── public/
+│   └── .nojekyll               # GitHub Pages config
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml           # GitHub Actions deployment workflow
+│       └── deploy.yml          # GitHub Actions deployment workflow
+├── package.json
+├── vite.config.ts
 └── README.md
 ```
 
@@ -116,10 +110,10 @@ zip2mp/
 
 To add support for a new country:
 
-1. Create a new service file in `frontend/src/services/` (e.g., `uk.ts`)
+1. Create a new service file in `src/services/` (e.g., `uk.ts`)
 2. Implement the lookup function following the pattern in `canada.ts` or `usa.ts`
 3. Export a `ContactInfo` interface and lookup function
-4. Register it in `frontend/src/services/lookup.ts`
+4. Register it in `src/services/lookup.ts`
 5. Add the country to `getSupportedCountries()` in `lookup.ts`
 
 ## Notes

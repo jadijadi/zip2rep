@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import './App.css'
 import { lookupMP, getSupportedCountries, type LookupResponse } from './services/lookup'
-import type { ContactInfo } from './types'
 
 interface Country {
   code: string
@@ -45,10 +44,10 @@ function App() {
       <div className="container mx-auto px-4 py-8">
         <header className="text-center mb-12">
           <h1 className="text-5xl font-bold text-gray-900 mb-4">
-            Zip2MP
+            Zip2Rep
           </h1>
           <p className="text-xl text-gray-600">
-            Find Your Member of Parliament by Country and Postal Code
+            Find Your Representative by Country and Postal Code
           </p>
         </header>
 
@@ -198,7 +197,7 @@ function App() {
         </div>
 
         <footer className="text-center mt-12 text-gray-600">
-          <p>Zip2MP - Find your representatives easily</p>
+          <p>Zip2Rep - Find your representatives easily</p>
         </footer>
       </div>
     </div>

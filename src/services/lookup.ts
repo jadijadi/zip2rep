@@ -12,9 +12,12 @@ export interface LookupResponse {
   representatives: ContactInfo[]
 }
 
+// Re-export ContactInfo to ensure it's recognized as used
+export type { ContactInfo }
+
 export async function lookupMP(country: string, postalCode: string): Promise<LookupResponse> {
   const countryUpper = country.toUpperCase().trim()
-  let representatives: ContactInfo[] = []
+  let representatives = [] as ContactInfo[]
 
   switch (countryUpper) {
     case 'CA':
