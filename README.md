@@ -62,11 +62,16 @@ npm run build
 
 ### Base Path Configuration
 
-If your repository name is `zip2rep`, the app is configured to work at `https://yourusername.github.io/zip2rep/`.
+The app is configured for the custom domain `zip2rep.ca` with `base: '/'` in `vite.config.ts`.
 
-To change the base path, edit `vite.config.ts`:
-- For root domain: `base: '/'`
-- For subdirectory: `base: '/your-repo-name/'`
+**For custom domain:**
+- Set `base: '/'` in `vite.config.ts` (already configured)
+- Add `CNAME` file in `public/` directory with your domain (already added: `zip2rep.ca`)
+- Configure DNS settings in your domain registrar to point to GitHub Pages
+
+**For GitHub Pages subdirectory:**
+- Set `base: '/your-repo-name/'` in `vite.config.ts`
+- Remove or don't include `CNAME` file
 
 ## Testing
 

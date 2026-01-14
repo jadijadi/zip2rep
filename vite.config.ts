@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react'
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
-  base: '/zip2rep/', // GitHub Pages base path - change to '/' if using custom domain
+  base: '/', // Root path for custom domain (zip2rep.ca)
   build: {
     outDir: 'dist',
   },
