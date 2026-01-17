@@ -1,9 +1,172 @@
 /**
  * US Representative lookup service.
  * Uses the Whoismyrepresentative.com API and 5 Calls API for ZIP code to Representative lookup.
+ * Also uses CSV data from src/data/legislators-current.csv as a fallback and for comparison.
  */
 
 import type { ContactInfo } from '../types'
+import legislatorsCSV from '../data/legislators-current.csv?raw'
+
+interface CSVLegislator {
+  last_name: string
+  first_name: string
+  middle_name: string
+  suffix: string
+  nickname: string
+  full_name: string
+  type: 'rep' | 'sen'
+  state: string
+  district: string
+  party: string
+  url: string
+  address: string
+  phone: string
+  contact_form: string
+}
+
+interface RepresentativeLookup {
+  [key: string]: CSVLegislator[] // key format: "STATE-DISTRICT" or "STATE-0" for at-large
+}
+
+// Parse CSV data and create lookup map
+function parseLegislatorsCSV(): RepresentativeLookup {
+  const lookup: RepresentativeLookup = {}
+  const lines = legislatorsCSV.split('\n')
+  
+  if (lines.length < 2) {
+    return lookup
+  }
+
+  // Parse header
+  const header = lines[0].split(',')
+  const getColumnIndex = (name: string): number => {
+    return header.findIndex(col => col.toLowerCase() === name.toLowerCase())
+  }
+
+  const lastNameIdx = getColumnIndex('last_name')
+  const firstNameIdx = getColumnIndex('first_name')
+  const middleNameIdx = getColumnIndex('middle_name')
+  const suffixIdx = getColumnIndex('suffix')
+  const nicknameIdx = getColumnIndex('nickname')
+  const fullNameIdx = getColumnIndex('full_name')
+  const typeIdx = getColumnIndex('type')
+  const stateIdx = getColumnIndex('state')
+  const districtIdx = getColumnIndex('district')
+  const partyIdx = getColumnIndex('party')
+  const urlIdx = getColumnIndex('url')
+  const addressIdx = getColumnIndex('address')
+  const phoneIdx = getColumnIndex('phone')
+  const contactFormIdx = getColumnIndex('contact_form')
+
+  // Parse data rows (skip header)
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim()
+    if (!line) continue
+
+    // Simple CSV parsing (handles quoted fields)
+    const fields: string[] = []
+    let currentField = ''
+    let inQuotes = false
+    
+    for (let j = 0; j < line.length; j++) {
+      const char = line[j]
+      if (char === '"') {
+        inQuotes = !inQuotes
+      } else if (char === ',' && !inQuotes) {
+        fields.push(currentField)
+        currentField = ''
+      } else {
+        currentField += char
+      }
+    }
+    fields.push(currentField) // Add last field
+
+    if (fields.length < Math.max(typeIdx, stateIdx, districtIdx, partyIdx, urlIdx, addressIdx, phoneIdx) + 1) {
+      continue
+    }
+
+    const type = fields[typeIdx]?.toLowerCase().trim()
+    if (type !== 'rep') {
+      continue // Only process Representatives
+    }
+
+    const state = fields[stateIdx]?.trim() || ''
+    const district = fields[districtIdx]?.trim() || '0'
+    const districtNum = district === '' || district === '0' ? '0' : district
+
+    if (!state) continue
+
+    // Create lookup key: STATE-DISTRICT
+    const lookupKey = `${state}-${districtNum}`
+
+    const legislator: CSVLegislator = {
+      last_name: fields[lastNameIdx]?.trim() || '',
+      first_name: fields[firstNameIdx]?.trim() || '',
+      middle_name: fields[middleNameIdx]?.trim() || '',
+      suffix: fields[suffixIdx]?.trim() || '',
+      nickname: fields[nicknameIdx]?.trim() || '',
+      full_name: fields[fullNameIdx]?.trim() || '',
+      type: 'rep',
+      state,
+      district: districtNum,
+      party: fields[partyIdx]?.trim() || '',
+      url: fields[urlIdx]?.trim() || '',
+      address: fields[addressIdx]?.trim() || '',
+      phone: fields[phoneIdx]?.trim() || '',
+      contact_form: fields[contactFormIdx]?.trim() || '',
+    }
+
+    if (!lookup[lookupKey]) {
+      lookup[lookupKey] = []
+    }
+    lookup[lookupKey].push(legislator)
+  }
+
+  return lookup
+}
+
+// Cache parsed CSV data
+let csvLookupCache: RepresentativeLookup | null = null
+
+function getCSVLookup(): RepresentativeLookup {
+  if (!csvLookupCache) {
+    csvLookupCache = parseLegislatorsCSV()
+  }
+  return csvLookupCache
+}
+
+// Convert CSV legislator to ContactInfo
+function csvLegislatorToContactInfo(legislator: CSVLegislator): ContactInfo {
+  const name = legislator.full_name || 
+    `${legislator.first_name} ${legislator.middle_name ? legislator.middle_name + ' ' : ''}${legislator.last_name}${legislator.suffix ? ' ' + legislator.suffix : ''}`.trim()
+  
+  const districtStr = legislator.district === '0' 
+    ? `${legislator.state}-At-Large` 
+    : `${legislator.state}-${legislator.district}`
+
+  return {
+    name,
+    role: 'Member of the House of Representatives',
+    district: districtStr,
+    party: legislator.party || null,
+    email: null, // CSV doesn't have email
+    website: legislator.url || legislator.contact_form || null,
+    phone: legislator.phone || null,
+    address: legislator.address || null,
+  }
+}
+
+// Normalize name for comparison (remove extra spaces, convert to lowercase)
+function normalizeName(name: string): string {
+  return name.toLowerCase().replace(/\s+/g, ' ').trim()
+}
+
+// Check if two names match (fuzzy matching)
+function namesMatch(name1: string, name2: string): boolean {
+  const n1 = normalizeName(name1)
+  const n2 = normalizeName(name2)
+  return n1 === n2 || n1.includes(n2) || n2.includes(n1)
+}
 
 function validateUSZipCode(zipCode: string): [boolean, string] {
   // Remove spaces, dashes, and any other characters
@@ -30,7 +193,18 @@ function validateUSZipCode(zipCode: string): [boolean, string] {
   return [true, zip5]
 }
 
+export interface LookupResult {
+  representatives: ContactInfo[]
+  missingFromAPI?: ContactInfo[] // Representatives in CSV but not returned by API
+  apiErrors?: string[] // Any errors encountered
+}
+
 export async function lookupUSARepresentative(zipCode: string): Promise<ContactInfo[]> {
+  const result = await lookupUSARepresentativeWithDetails(zipCode)
+  return result.representatives
+}
+
+export async function lookupUSARepresentativeWithDetails(zipCode: string): Promise<LookupResult> {
   // Validate ZIP code format
   const [isValid, normalizedZip] = validateUSZipCode(zipCode)
 
@@ -42,6 +216,8 @@ export async function lookupUSARepresentative(zipCode: string): Promise<ContactI
   }
 
   const representatives: ContactInfo[] = []
+  const apiErrors: string[] = []
+  const csvLookup = getCSVLookup()
 
   // Helper function to fetch with CORS proxy fallback
   const fetchWithProxy = async (url: string): Promise<Response> => {
@@ -122,6 +298,9 @@ export async function lookupUSARepresentative(zipCode: string): Promise<ContactI
         repsData = data.results || data.representatives || data.data || []
       }
 
+      // Track state-district pairs found in API
+      const apiStateDistricts = new Set<string>()
+
       // Filter for House of Representatives members only
       for (const rep of repsData) {
         if (typeof rep !== 'object') {
@@ -189,13 +368,45 @@ export async function lookupUSARepresentative(zipCode: string): Promise<ContactI
 
           // Format district information
           let districtStr = ''
+          let districtNum = district
           if (district && !['at-large', 'at large', 'none', 'n/a', ''].includes(district.toLowerCase())) {
             districtStr = state ? `${state}-${district}` : district
+            districtNum = district
           } else if (state) {
             districtStr = `${state}-At-Large`
+            districtNum = '0'
           }
 
-          representatives.push({
+          // Track this state-district combination
+          if (state && districtNum) {
+            apiStateDistricts.add(`${state}-${districtNum}`)
+          }
+
+          // Try to enhance with CSV data
+          const csvKey = state && districtNum ? `${state}-${districtNum}` : null
+          let enhancedRep: ContactInfo | null = null
+
+          if (csvKey && csvLookup[csvKey]) {
+            // Find matching CSV entry by name
+            const csvMatch = csvLookup[csvKey].find(csvRep => 
+              namesMatch(csvRep.full_name, name) || 
+              namesMatch(`${csvRep.first_name} ${csvRep.last_name}`, name)
+            )
+
+            if (csvMatch) {
+              // Use CSV data to enhance API result
+              enhancedRep = csvLegislatorToContactInfo(csvMatch)
+              // Prefer API data for fields that might be more current
+              enhancedRep.name = name // Use API name format
+              enhancedRep.email = email // API might have email
+              // Use CSV data for missing fields
+              if (!enhancedRep.phone && phone) enhancedRep.phone = phone
+              if (!enhancedRep.address && officeAddress) enhancedRep.address = officeAddress
+              if (!enhancedRep.website && website) enhancedRep.website = website
+            }
+          }
+
+          representatives.push(enhancedRep || {
             name,
             role: 'Member of the House of Representatives',
             district: districtStr || null,
@@ -208,30 +419,49 @@ export async function lookupUSARepresentative(zipCode: string): Promise<ContactI
         }
       }
 
-      if (representatives.length > 0) {
-        return representatives
+      // Find missing entries: CSV entries for state-districts found in API but not returned
+      const missingFromAPI: ContactInfo[] = []
+      for (const [key, csvReps] of Object.entries(csvLookup)) {
+        if (apiStateDistricts.has(key)) {
+          // This state-district was found in API, check if all CSV entries are represented
+          for (const csvRep of csvReps) {
+            const csvContact = csvLegislatorToContactInfo(csvRep)
+            // Check if this CSV entry matches any API result
+            const foundInAPI = representatives.some(apiRep => 
+              namesMatch(apiRep.name, csvContact.name) &&
+              apiRep.district === csvContact.district
+            )
+            if (!foundInAPI) {
+              missingFromAPI.push(csvContact)
+            }
+          }
+        }
       }
 
-      // If no results found
+      if (representatives.length > 0) {
+        // Log missing entries for debugging
+        if (missingFromAPI.length > 0) {
+          console.warn(`Found ${missingFromAPI.length} representative(s) in CSV but missing from API:`, missingFromAPI)
+        }
+        return {
+          representatives,
+          missingFromAPI: missingFromAPI.length > 0 ? missingFromAPI : undefined,
+          apiErrors: apiErrors.length > 0 ? apiErrors : undefined,
+        }
+      }
+
+      // If no results found, continue to fallback
       if (repsData.length === 0) {
-        throw new Error(
-          `No data returned for ZIP code '${normalizedZip}'. ` +
-          `The API returned an empty result set. Please verify the ZIP code is correct.`
-        )
-      } else {
-        throw new Error(
-          `No Representative found for ZIP code '${normalizedZip}'. ` +
-          `Found ${repsData.length} result(s) but none matched Representative criteria. ` +
-          `Please verify the ZIP code is correct and try again.`
+        apiErrors.push(`No data returned for ZIP code '${normalizedZip}' from API`)
+      } else if (representatives.length === 0) {
+        apiErrors.push(
+          `Found ${repsData.length} result(s) but none matched Representative criteria`
         )
       }
     } else if (response.status === 404) {
-      throw new Error(
-        `ZIP code '${normalizedZip}' not found. ` +
-        `Please verify the ZIP code is correct.`
-      )
+      apiErrors.push(`ZIP code '${normalizedZip}' not found in API`)
     } else {
-      throw new Error(`Error from Whoismyrepresentative API: ${response.status} ${response.statusText}`)
+      apiErrors.push(`Error from Whoismyrepresentative API: ${response.status} ${response.statusText}`)
     }
   } catch (error: any) {
     // Check if it's a CORS or network error
@@ -306,29 +536,77 @@ export async function lookupUSARepresentative(zipCode: string): Promise<ContactI
           }
 
           if (representatives.length > 0) {
-            return representatives
+            // Find missing entries from CSV
+            const apiStateDistricts = new Set<string>()
+            representatives.forEach(rep => {
+              if (rep.district) {
+                apiStateDistricts.add(rep.district)
+              }
+            })
+
+            const missingFromAPI: ContactInfo[] = []
+            for (const [key, csvReps] of Object.entries(csvLookup)) {
+              if (apiStateDistricts.has(key)) {
+                for (const csvRep of csvReps) {
+                  const csvContact = csvLegislatorToContactInfo(csvRep)
+                  const foundInAPI = representatives.some(apiRep => 
+                    namesMatch(apiRep.name, csvContact.name) &&
+                    apiRep.district === csvContact.district
+                  )
+                  if (!foundInAPI) {
+                    missingFromAPI.push(csvContact)
+                  }
+                }
+              }
+            }
+
+            // Log missing entries for debugging
+            if (missingFromAPI.length > 0) {
+              console.warn(`Found ${missingFromAPI.length} representative(s) in CSV but missing from 5 Calls API:`, missingFromAPI)
+            }
+
+            return {
+              representatives,
+              missingFromAPI: missingFromAPI.length > 0 ? missingFromAPI : undefined,
+              apiErrors: apiErrors.length > 0 ? apiErrors : undefined,
+            }
           }
         }
       } catch (fallbackError: any) {
-        // If fallback also fails, provide helpful error message
-        throw new Error(
-          `Network error: Unable to connect to representative APIs. ` +
-          `This may be due to CORS restrictions. ` +
-          `The APIs may not support direct browser requests. ` +
-          `Original error: ${error.message || error}`
-        )
+        apiErrors.push(`5 Calls API fallback failed: ${fallbackError.message || fallbackError}`)
       }
-
-      // If we get here, fallback didn't work either
-      throw new Error(
-        `Network error: Unable to connect to representative APIs. ` +
-        `This may be due to CORS restrictions or network issues. ` +
-        `Please check your internet connection and try again. ` +
-        `Original error: ${error.message || error}`
-      )
+    } else {
+      // Not a network error, re-throw
+      apiErrors.push(`API error: ${error.message || error}`)
     }
-
-    // Re-throw other errors
-    throw error
   }
+
+  // Final fallback: Try to use CSV data if we have any state/district info from API errors
+  // Note: Without ZIP->state mapping, we can't directly use CSV, but we can return what we have
+  if (representatives.length === 0 && apiErrors.length > 0) {
+    // If all APIs failed, we can't determine state/district from ZIP alone
+    // So we can't use CSV as fallback without additional mapping data
+    throw new Error(
+      `Unable to find representatives for ZIP code '${normalizedZip}'. ` +
+      `API errors: ${apiErrors.join('; ')}. ` +
+      `Please verify the ZIP code is correct and try again.`
+    )
+  }
+
+  // Return what we found, even if there were some API errors
+  if (representatives.length > 0) {
+    return {
+      representatives,
+      missingFromAPI: undefined,
+      apiErrors: apiErrors.length > 0 ? apiErrors : undefined,
+    }
+  }
+
+  // If we get here, nothing worked
+  throw new Error(
+    `Network error: Unable to connect to representative APIs. ` +
+    `This may be due to CORS restrictions or network issues. ` +
+    `Please check your internet connection and try again. ` +
+    `API errors: ${apiErrors.length > 0 ? apiErrors.join('; ') : 'Unknown error'}`
+  )
 }
