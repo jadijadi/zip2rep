@@ -1,7 +1,7 @@
 /**
  * US Representative lookup service.
- * Uses the Whoismyrepresentative.com API and 5 Calls API for ZIP code to Representative lookup.
- * Also uses CSV data from src/data/legislators-current.csv as a fallback and for comparison.
+ * Uses APIs only for ZIP-to-district mapping, then uses CSV data from src/data/legislators-current.csv
+ * and house.gov data as the primary source of truth for representative information (more accurate and up-to-date).
  */
 
 import type { ContactInfo } from '../types'
@@ -156,17 +156,299 @@ function csvLegislatorToContactInfo(legislator: CSVLegislator): ContactInfo {
   }
 }
 
-// Normalize name for comparison (remove extra spaces, convert to lowercase)
-function normalizeName(name: string): string {
-  return name.toLowerCase().replace(/\s+/g, ' ').trim()
+// Cache for house.gov ZIP lookup results
+let houseGovZipCache: Map<string, ContactInfo[]> = new Map()
+
+// Use house.gov ZIP code search to find representatives
+async function lookupHouseGovByZip(zipCode: string): Promise<ContactInfo[]> {
+  // Check cache first
+  if (houseGovZipCache.has(zipCode)) {
+    return houseGovZipCache.get(zipCode) || []
+  }
+
+  const representatives: ContactInfo[] = []
+
+  try {
+    // Use the official house.gov ZIP lookup endpoint
+    const lookupUrl = `https://ziplook.house.gov/htbin/findrep_house?ZIP=${zipCode}`
+    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(lookupUrl)}`
+    
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 5000)
+    
+    const response = await fetch(proxyUrl, { 
+      signal: controller.signal,
+      method: 'GET'
+    })
+    clearTimeout(timeoutId)
+
+    if (response.ok) {
+      const proxyData = await response.json()
+      const html = proxyData.contents
+
+      if (html && typeof html === 'string') {
+        const parser = new DOMParser()
+        const doc = parser.parseFromString(html, 'text/html')
+
+        // Parse the "Your Possible Representatives" section
+        // Format: Name, Party, State District
+        // Example: "Scott H. Peters", "Democrat", "California District 50"
+        
+        // First, find the "Your Possible Representatives" section
+        let repsSection: Element | null = null
+        
+        // Look for the heading
+        const headings = doc.querySelectorAll('h1, h2, h3, h4, h5, h6, strong, b')
+        for (const heading of Array.from(headings)) {
+          const text = heading.textContent?.toLowerCase() || ''
+          if (text.includes('possible representative') || text.includes('your representative')) {
+            // Find the section containing the representatives (next sibling or parent's next sibling)
+            repsSection = heading.nextElementSibling || heading.parentElement?.nextElementSibling || heading.parentElement
+            break
+          }
+        }
+        
+        // If we found the section, only parse within it
+        const searchRoot = repsSection || doc.body
+        
+        // State abbreviation map
+        const stateAbbrMap: { [key: string]: string } = {
+          'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR',
+          'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE',
+          'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID',
+          'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA', 'Kansas': 'KS',
+          'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD',
+          'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS',
+          'Missouri': 'MO', 'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV',
+          'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY',
+          'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK',
+          'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC',
+          'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT',
+          'Vermont': 'VT', 'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV',
+          'Wisconsin': 'WI', 'Wyoming': 'WY',
+        }
+        
+        // Exclude navigation and footer links
+        const excludeKeywords = [
+          'terms of use', 'accessibility', 'contact webmaster', 'privacy policy',
+          'site map', 'site tools', 'watch live', 'skip', 'search', 'navigation',
+          'visitors', 'educators', 'students', 'media', 'employment', 'doing business'
+        ]
+        
+        // Use a Set to track unique representatives by name+district to avoid duplicates
+        const seenReps = new Set<string>()
+        
+        // Method 1: Look for structured text pattern first (most reliable)
+        // Pattern: "Name Party State District" (e.g., "Scott H. Peters Democrat California District 50")
+        // The text might be on separate lines, so normalize whitespace first
+        let sectionText = searchRoot.textContent || ''
+        // Normalize whitespace - replace multiple spaces/newlines/tabs with single space
+        sectionText = sectionText.replace(/[\s\n\r\t]+/g, ' ')
+        
+        // Debug: log a sample of the text to see what we're parsing
+        console.log('Parsing section text (first 1000 chars):', sectionText.substring(0, 1000))
+        
+        // Pattern that matches: Name (with optional middle initial) + Party + State + District
+        // Use global flag and reset lastIndex to ensure we get all matches
+        // Make pattern more flexible to handle variations
+        const repPattern = /([A-Z][a-z]+(?:\s+[A-Z]\.?\s+)?[A-Z][a-z]+)\s+(Democrat|Republican|Independent)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+District\s+(\d+)/gi
+        const matches: Array<{name: string, party: string, state: string, district: string}> = []
+        
+        // Collect all matches first - use matchAll for better results
+        const allMatches = sectionText.matchAll(repPattern)
+        for (const match of allMatches) {
+          const name = match[1].trim()
+          const party = match[2]
+          const stateName = match[3]
+          const district = match[4]
+          
+          // Convert state name to abbreviation
+          const state = stateAbbrMap[stateName] || stateName
+          
+          matches.push({ name, party, state, district })
+          console.log(`Matched: ${name} - ${party} - ${state} - ${district}`)
+        }
+        
+        console.log(`Total matches found: ${matches.length}`)
+        
+        // Process matches and add to representatives
+        for (const { name, party, state, district } of matches) {
+          // Create unique key for deduplication (normalize name variations)
+          const normalizedName = name.toLowerCase().replace(/\s+/g, ' ')
+          const uniqueKey = `${normalizedName}-${state}-${district}`
+          
+          if (!seenReps.has(uniqueKey)) {
+            seenReps.add(uniqueKey)
+            representatives.push({
+              name: name,
+              role: 'Member of the House of Representatives',
+              district: `${state}-${district}`,
+              party: party,
+              email: null,
+              website: null,
+              phone: null,
+              address: null,
+            })
+          }
+        }
+        
+        console.log(`Found ${representatives.length} representatives from house.gov for ZIP ${zipCode}:`, representatives.map(r => `${r.name} (${r.district})`))
+        
+        // Method 2: Parse by looking for blocks/containers that have all the info
+        // Look for divs or list items that contain name, party, and district
+        // This is a fallback if regex didn't find all reps
+        if (representatives.length < 3) {
+          // Try finding representative blocks - they might be in divs or list items
+          const repBlocks = searchRoot.querySelectorAll('div, li, p, tr, span')
+          
+          repBlocks.forEach((block) => {
+            const blockText = block.textContent || ''
+            
+            // Check if this block contains a representative pattern
+            // Look for: Name + Party + State District
+            const nameMatch = blockText.match(/([A-Z][a-z]+(?:\s+[A-Z]\.?\s+)?[A-Z][a-z]+)/)
+            const partyMatch = blockText.match(/\b(Democrat|Republican|Independent)\b/i)
+            const districtMatch = blockText.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+District\s+(\d+)/i)
+            
+            if (nameMatch && partyMatch && districtMatch) {
+              const name = nameMatch[1].trim()
+              const party = partyMatch[1]
+              const stateName = districtMatch[1]
+              const district = districtMatch[2]
+              
+              // Skip if it's a navigation link
+              const nameLower = name.toLowerCase()
+              if (excludeKeywords.some(keyword => nameLower.includes(keyword))) {
+                return
+              }
+              
+              // Convert state name to abbreviation
+              const state = stateAbbrMap[stateName] || stateName
+              
+              // Create unique key for deduplication
+              const uniqueKey = `${name.toLowerCase()}-${state}-${district}`
+              
+              if (!seenReps.has(uniqueKey)) {
+                seenReps.add(uniqueKey)
+                
+                // Try to find website link in this block
+                const link = block.querySelector('a[href*="house.gov"]')
+                const href = link?.getAttribute('href') || ''
+                
+                representatives.push({
+                  name: name,
+                  role: 'Member of the House of Representatives',
+                  district: `${state}-${district}`,
+                  party: party,
+                  email: null,
+                  website: href.startsWith('http') ? href : href ? `https://www.house.gov${href}` : null,
+                  phone: null,
+                  address: null,
+                })
+              }
+            }
+          })
+        }
+        
+        // Re-sort and deduplicate after all parsing methods
+        const finalReps: ContactInfo[] = []
+        const finalSeen = new Set<string>()
+        
+        for (const rep of representatives) {
+          const key = `${rep.name.toLowerCase()}-${rep.district}`
+          if (!finalSeen.has(key)) {
+            finalSeen.add(key)
+            finalReps.push(rep)
+          }
+        }
+        
+        representatives.length = 0
+        representatives.push(...finalReps)
+        
+        // Method 3: If still no results, try link-based parsing as fallback
+        if (representatives.length === 0) {
+          const allLinks = searchRoot.querySelectorAll('a[href*="house.gov"], a[href*=".gov"]')
+          
+          allLinks.forEach((link) => {
+            const name = link.textContent?.trim() || ''
+            const href = link.getAttribute('href') || ''
+            
+            // Skip navigation/footer links
+            const nameLower = name.toLowerCase()
+            if (excludeKeywords.some(keyword => nameLower.includes(keyword))) {
+              return
+            }
+            
+            // Check if this looks like a representative name (has first and last name pattern)
+            const namePattern = /^[A-Z][a-z]+(?:\s+[A-Z]\.?\s+)?[A-Z][a-z]+$/
+            if (name && namePattern.test(name) && name.length > 5) {
+              
+              // Get parent container to find party and district info
+              const container = link.closest('div, li, p, td, span') || link.parentElement
+              const containerText = container?.textContent || ''
+              
+              // Extract party
+              let party = ''
+              if (containerText.match(/\bDemocrat\b/i)) {
+                party = 'Democrat'
+              } else if (containerText.match(/\bRepublican\b/i)) {
+                party = 'Republican'
+              } else if (containerText.match(/\bIndependent\b/i)) {
+                party = 'Independent'
+              }
+              
+              // Extract state and district
+              const districtMatch = containerText.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+District\s+(\d+)|([A-Z]{2})\s+District\s+(\d+)/i)
+              let state = ''
+              let district = ''
+              
+              if (districtMatch) {
+                state = districtMatch[1] || districtMatch[3] || ''
+                district = districtMatch[2] || districtMatch[4] || ''
+                
+                if (state.length > 2) {
+                  state = stateAbbrMap[state] || state
+                }
+              }
+              
+              // Only add if we have name, party, and district
+              if (name && party && state && district) {
+                const uniqueKey = `${name.toLowerCase()}-${state}-${district}`
+                
+                if (!seenReps.has(uniqueKey)) {
+                  seenReps.add(uniqueKey)
+                  representatives.push({
+                    name: name,
+                    role: 'Member of the House of Representatives',
+                    district: `${state}-${district}`,
+                    party: party,
+                    email: null,
+                    website: href.startsWith('http') ? href : href ? `https://www.house.gov${href}` : null,
+                    phone: null,
+                    address: null,
+                  })
+                }
+              }
+            }
+          })
+        }
+      }
+    }
+  } catch (error: any) {
+    if (error.name !== 'AbortError') {
+      console.warn('house.gov ZIP lookup failed:', error.message || error)
+    }
+  }
+
+  // Cache results
+  if (representatives.length > 0) {
+    houseGovZipCache.set(zipCode, representatives)
+  }
+
+  return representatives
 }
 
-// Check if two names match (fuzzy matching)
-function namesMatch(name1: string, name2: string): boolean {
-  const n1 = normalizeName(name1)
-  const n2 = normalizeName(name2)
-  return n1 === n2 || n1.includes(n2) || n2.includes(n1)
-}
+// Note: fetchHouseGovData and getStateAbbreviation removed - we now use lookupHouseGovByZip for ZIP-specific lookups
 
 function validateUSZipCode(zipCode: string): [boolean, string] {
   // Remove spaces, dashes, and any other characters
@@ -218,6 +500,24 @@ export async function lookupUSARepresentativeWithDetails(zipCode: string): Promi
   const representatives: ContactInfo[] = []
   const apiErrors: string[] = []
   const csvLookup = getCSVLookup()
+  
+  // Step 1: Use house.gov ZIP lookup to get representative names (primary source)
+  let houseGovReps: ContactInfo[] = []
+  try {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 5000)
+    
+    houseGovReps = await Promise.race([
+      lookupHouseGovByZip(normalizedZip),
+      new Promise<ContactInfo[]>((resolve) => {
+        setTimeout(() => resolve([]), 5000)
+      })
+    ])
+    
+    clearTimeout(timeoutId)
+  } catch (error: any) {
+    console.warn('house.gov ZIP lookup failed, using fallback:', error.message || error)
+  }
 
   // Helper function to fetch with CORS proxy fallback
   const fetchWithProxy = async (url: string): Promise<Response> => {
@@ -270,7 +570,11 @@ export async function lookupUSARepresentativeWithDetails(zipCode: string): Promi
     }
   }
 
-  // Try Whoismyrepresentative.com API first
+  // Use API only to get state/district mapping from ZIP code
+  // Then use CSV as the primary source of truth for representative data
+  const foundStateDistricts = new Set<string>()
+
+  // Try Whoismyrepresentative.com API first to get ZIP -> district mapping
   try {
     const apiUrl = new URL('https://whoismyrepresentative.com/getall_mems.php')
     apiUrl.searchParams.set('zip', normalizedZip)
@@ -298,26 +602,23 @@ export async function lookupUSARepresentativeWithDetails(zipCode: string): Promi
         repsData = data.results || data.representatives || data.data || []
       }
 
-      // Track state-district pairs found in API
-      const apiStateDistricts = new Set<string>()
-
-      // Filter for House of Representatives members only
+      // Extract state-district pairs from API (don't trust API's representative names)
+      // Also collect email addresses if available from API
+      const apiEmailsByDistrict = new Map<string, string>() // key: "STATE-DISTRICT", value: email
+      
       for (const rep of repsData) {
         if (typeof rep !== 'object') {
           continue
         }
 
-        const name = rep.name || rep.Name || ''
         const officeField = String(rep.office || rep.Office || '').toLowerCase()
         const district = String(rep.district || rep.District || '').trim()
         const state = rep.state || rep.State || ''
+        
+        // Check if API has email address
+        const email = rep.email || rep.Email || rep.email_address || rep.contact_email || null
 
-        // Skip if no name
-        if (!name) {
-          continue
-        }
-
-        // Skip Senators - they represent entire states, not districts
+        // Skip Senators
         const isSenator =
           officeField.includes('senator') ||
           officeField.includes('senate') ||
@@ -328,7 +629,7 @@ export async function lookupUSARepresentativeWithDetails(zipCode: string): Promi
           continue
         }
 
-        // Identify Representatives
+        // Identify Representatives by checking for district or title
         const isRepByTitle =
           officeField.includes('representative') ||
           officeField.includes('house') ||
@@ -336,127 +637,131 @@ export async function lookupUSARepresentativeWithDetails(zipCode: string): Promi
           (rep.Title || '').toLowerCase() === 'representative'
 
         let isRepresentative = false
+        let districtNum = district
 
         if (district && !['', 'none', 'n/a'].includes(district.toLowerCase())) {
-          // Has a district number - this is a Representative
           isRepresentative = true
-        } else if (isRepByTitle) {
-          // Title explicitly says representative
+          districtNum = district
+        } else if (isRepByTitle && state) {
           isRepresentative = true
+          districtNum = '0' // At-large
         } else if (state && !isSenator) {
           // If we have a state and it's not a senator, assume it's a rep
           isRepresentative = true
+          districtNum = '0' // At-large
         }
 
-        if (isRepresentative) {
-          const party = rep.party || rep.Party || ''
-          const phone = rep.phone || rep.Phone || ''
-          let officeAddress = rep.office || rep.Office || ''
-          // If office field looks like office type rather than address, try other fields
-          if (['representative', 'senator', 'house', 'senate'].includes(officeAddress.toLowerCase())) {
-            officeAddress = rep.address || rep.Address || ''
+        if (isRepresentative && state && districtNum) {
+          const key = `${state}-${districtNum}`
+          foundStateDistricts.add(key)
+          
+          // Store email if available
+          if (email && typeof email === 'string' && email.includes('@')) {
+            apiEmailsByDistrict.set(key, email)
           }
-          const website = rep.link || rep.Link || rep.website || rep.Website || ''
+        }
+      }
 
-          // Check for email in various possible fields (though APIs typically don't provide it)
-          const email =
-            rep.email ||
-            rep.Email ||
-            rep.email_address ||
-            rep.EmailAddress ||
-            null
-
-          // Format district information
-          let districtStr = ''
-          let districtNum = district
-          if (district && !['at-large', 'at large', 'none', 'n/a', ''].includes(district.toLowerCase())) {
-            districtStr = state ? `${state}-${district}` : district
-            districtNum = district
-          } else if (state) {
-            districtStr = `${state}-At-Large`
-            districtNum = '0'
+      // Step 2: If we got names from house.gov, enrich them with CSV/API data
+      if (houseGovReps.length > 0) {
+        // Use Set to ensure no duplicates during enrichment
+        const enrichedRepsSet = new Map<string, ContactInfo>()
+        
+        // Enrich house.gov names with detailed data from CSV
+        for (const houseGovRep of houseGovReps) {
+          // Create unique key for this rep
+          const repKey = houseGovRep.district || houseGovRep.name.toLowerCase()
+          
+          // Skip if we already processed this rep
+          if (enrichedRepsSet.has(repKey)) {
+            continue
           }
-
-          // Track this state-district combination
-          if (state && districtNum) {
-            apiStateDistricts.add(`${state}-${districtNum}`)
-          }
-
-          // Try to enhance with CSV data
-          const csvKey = state && districtNum ? `${state}-${districtNum}` : null
-          let enhancedRep: ContactInfo | null = null
-
-          if (csvKey && csvLookup[csvKey]) {
-            // Find matching CSV entry by name
-            const csvMatch = csvLookup[csvKey].find(csvRep => 
-              namesMatch(csvRep.full_name, name) || 
-              namesMatch(`${csvRep.first_name} ${csvRep.last_name}`, name)
-            )
-
-            if (csvMatch) {
-              // Use CSV data to enhance API result
-              enhancedRep = csvLegislatorToContactInfo(csvMatch)
-              // Prefer API data for fields that might be more current
-              enhancedRep.name = name // Use API name format
-              enhancedRep.email = email // API might have email
-              // Use CSV data for missing fields
-              if (!enhancedRep.phone && phone) enhancedRep.phone = phone
-              if (!enhancedRep.address && officeAddress) enhancedRep.address = officeAddress
-              if (!enhancedRep.website && website) enhancedRep.website = website
+          
+          let enrichedRep = { ...houseGovRep }
+          
+          // Try to find matching CSV entry by name and district
+          if (houseGovRep.district) {
+            const [state, district] = houseGovRep.district.split('-')
+            const csvKey = `${state}-${district}`
+            
+            if (csvLookup[csvKey]) {
+              // Find best matching CSV entry by name
+              const csvMatch = csvLookup[csvKey].find(csvRep => {
+                const csvName = csvRep.full_name.toLowerCase().replace(/\s+/g, ' ')
+                const houseName = houseGovRep.name.toLowerCase().replace(/\s+/g, ' ')
+                // More precise matching
+                const csvParts = csvName.split(' ').filter(p => p.length > 1)
+                const houseParts = houseName.split(' ').filter(p => p.length > 1)
+                
+                // Check if last names match and at least one first name part matches
+                const csvLastName = csvParts[csvParts.length - 1]
+                const houseLastName = houseParts[houseParts.length - 1]
+                
+                return csvLastName === houseLastName && 
+                       (csvParts[0] === houseParts[0] || 
+                        csvName.includes(houseParts[0]) || 
+                        houseName.includes(csvParts[0]))
+              })
+              
+              if (csvMatch) {
+                const csvContact = csvLegislatorToContactInfo(csvMatch)
+                
+                // Check if API has email for this district
+                const apiEmail = houseGovRep.district ? apiEmailsByDistrict.get(houseGovRep.district) : null
+                
+                // Merge: use house.gov name, but CSV for other details including email if available
+                enrichedRep = {
+                  ...csvContact,
+                  name: houseGovRep.name, // Prefer house.gov name format
+                  website: houseGovRep.website || csvContact.website,
+                  district: houseGovRep.district || csvContact.district,
+                  email: apiEmail || csvContact.email || houseGovRep.email || null, // Prefer API email, then CSV, then house.gov
+                  phone: csvContact.phone || houseGovRep.phone || null, // Prefer CSV phone
+                  address: csvContact.address || houseGovRep.address || null, // Prefer CSV address
+                }
+              } else {
+                // No CSV match, but check if API has email
+                const apiEmail = houseGovRep.district ? apiEmailsByDistrict.get(houseGovRep.district) : null
+                if (apiEmail) {
+                  enrichedRep.email = apiEmail
+                }
+              }
             }
           }
-
-          representatives.push(enhancedRep || {
-            name,
-            role: 'Member of the House of Representatives',
-            district: districtStr || null,
-            party: party || null,
-            email,
-            website: website || null,
-            phone: phone || null,
-            address: officeAddress || null,
-          })
+          
+          enrichedRepsSet.set(repKey, enrichedRep)
         }
-      }
-
-      // Find missing entries: CSV entries for state-districts found in API but not returned
-      const missingFromAPI: ContactInfo[] = []
-      for (const [key, csvReps] of Object.entries(csvLookup)) {
-        if (apiStateDistricts.has(key)) {
-          // This state-district was found in API, check if all CSV entries are represented
-          for (const csvRep of csvReps) {
-            const csvContact = csvLegislatorToContactInfo(csvRep)
-            // Check if this CSV entry matches any API result
-            const foundInAPI = representatives.some(apiRep => 
-              namesMatch(apiRep.name, csvContact.name) &&
-              apiRep.district === csvContact.district
-            )
-            if (!foundInAPI) {
-              missingFromAPI.push(csvContact)
-            }
+        
+        // Convert Map values to array
+        representatives.push(...Array.from(enrichedRepsSet.values()))
+        
+        if (representatives.length > 0) {
+          return {
+            representatives,
+            missingFromAPI: undefined,
+            apiErrors: apiErrors.length > 0 ? apiErrors : undefined,
           }
         }
       }
-
-      if (representatives.length > 0) {
-        // Log missing entries for debugging
-        if (missingFromAPI.length > 0) {
-          console.warn(`Found ${missingFromAPI.length} representative(s) in CSV but missing from API:`, missingFromAPI)
+      
+      // Fallback: Use CSV/API if house.gov didn't return results
+      if (foundStateDistricts.size > 0) {
+        for (const key of foundStateDistricts) {
+          const reps = csvLookup[key] || []
+          
+          for (const rep of reps) {
+            const contact = csvLegislatorToContactInfo(rep)
+            representatives.push(contact)
+          }
         }
-        return {
-          representatives,
-          missingFromAPI: missingFromAPI.length > 0 ? missingFromAPI : undefined,
-          apiErrors: apiErrors.length > 0 ? apiErrors : undefined,
-        }
-      }
 
-      // If no results found, continue to fallback
-      if (repsData.length === 0) {
-        apiErrors.push(`No data returned for ZIP code '${normalizedZip}' from API`)
-      } else if (representatives.length === 0) {
-        apiErrors.push(
-          `Found ${repsData.length} result(s) but none matched Representative criteria`
-        )
+        if (representatives.length > 0) {
+          return {
+            representatives,
+            missingFromAPI: undefined,
+            apiErrors: apiErrors.length > 0 ? apiErrors : undefined,
+          }
+        }
       }
     } else if (response.status === 404) {
       apiErrors.push(`ZIP code '${normalizedZip}' not found in API`)
@@ -486,89 +791,44 @@ export async function lookupUSARepresentativeWithDetails(zipCode: string): Promi
           const fallbackData = await fallbackResponse.json()
           const fallbackRepsData = fallbackData.reps || []
 
+          // Extract state-district pairs from 5 Calls API (don't trust API names)
           for (const rep of fallbackRepsData) {
             if (typeof rep !== 'object') {
               continue
             }
 
-            const name = rep.name || ''
             const chamber = (rep.chamber || '').toLowerCase()
-
-            // Filter for House members only
             if (chamber !== 'house') {
               continue
             }
 
-            if (name) {
-              const party = rep.party || ''
-              const phone = rep.phone || ''
-              const website = rep.contact_form || rep.url || ''
-              const district = rep.district || ''
-              const state = rep.state || ''
+            const district = rep.district || ''
+            const state = rep.state || ''
 
-              // Check for email
-              const email =
-                rep.email ||
-                rep.Email ||
-                rep.email_address ||
-                rep.EmailAddress ||
-                null
-
-              // Format district
-              let districtStr = ''
-              if (district) {
-                districtStr = state ? `${state}-${district}` : district
-              } else if (state) {
-                districtStr = `${state}-At-Large`
-              }
-
-              representatives.push({
-                name,
-                role: 'Member of the House of Representatives',
-                district: districtStr || null,
-                party: party || null,
-                email,
-                website: website || null,
-                phone: phone || null,
-                address: null, // 5 Calls doesn't provide address
-              })
+            if (state) {
+              const districtNum = district || '0'
+              const key = `${state}-${districtNum}`
+              foundStateDistricts.add(key)
             }
           }
 
-          if (representatives.length > 0) {
-            // Find missing entries from CSV
-            const apiStateDistricts = new Set<string>()
-            representatives.forEach(rep => {
-              if (rep.district) {
-                apiStateDistricts.add(rep.district)
-              }
-            })
-
-            const missingFromAPI: ContactInfo[] = []
-            for (const [key, csvReps] of Object.entries(csvLookup)) {
-              if (apiStateDistricts.has(key)) {
-                for (const csvRep of csvReps) {
-                  const csvContact = csvLegislatorToContactInfo(csvRep)
-                  const foundInAPI = representatives.some(apiRep => 
-                    namesMatch(apiRep.name, csvContact.name) &&
-                    apiRep.district === csvContact.district
-                  )
-                  if (!foundInAPI) {
-                    missingFromAPI.push(csvContact)
-                  }
-                }
+          // Use CSV as fallback after getting districts from 5 Calls API
+          if (foundStateDistricts.size > 0 && representatives.length === 0) {
+            for (const key of foundStateDistricts) {
+              const reps = csvLookup[key] || []
+              
+              for (const rep of reps) {
+                const contact = csvLegislatorToContactInfo(rep)
+                representatives.push(contact)
               }
             }
 
-            // Log missing entries for debugging
-            if (missingFromAPI.length > 0) {
-              console.warn(`Found ${missingFromAPI.length} representative(s) in CSV but missing from 5 Calls API:`, missingFromAPI)
-            }
-
-            return {
-              representatives,
-              missingFromAPI: missingFromAPI.length > 0 ? missingFromAPI : undefined,
-              apiErrors: apiErrors.length > 0 ? apiErrors : undefined,
+            if (representatives.length > 0) {
+              return {
+                representatives,
+                missingFromAPI: undefined,
+                apiErrors: apiErrors.length > 0 ? apiErrors : undefined,
+              }
             }
           }
         }
@@ -581,19 +841,25 @@ export async function lookupUSARepresentativeWithDetails(zipCode: string): Promi
     }
   }
 
-  // Final fallback: Try to use CSV data if we have any state/district info from API errors
-  // Note: Without ZIP->state mapping, we can't directly use CSV, but we can return what we have
-  if (representatives.length === 0 && apiErrors.length > 0) {
-    // If all APIs failed, we can't determine state/district from ZIP alone
-    // So we can't use CSV as fallback without additional mapping data
-    throw new Error(
-      `Unable to find representatives for ZIP code '${normalizedZip}'. ` +
-      `API errors: ${apiErrors.join('; ')}. ` +
-      `Please verify the ZIP code is correct and try again.`
-    )
+  // Final check: Use CSV if we found any districts but haven't returned yet
+  if (foundStateDistricts.size > 0 && representatives.length === 0) {
+    // We found districts but lookup didn't return results - try CSV
+    for (const key of foundStateDistricts) {
+      const reps = csvLookup[key] || []
+      
+      for (const rep of reps) {
+        const contact = csvLegislatorToContactInfo(rep)
+        representatives.push(contact)
+      }
+    }
+  }
+  
+  // If house.gov returned results but we haven't enriched them yet, use them as-is
+  if (houseGovReps.length > 0 && representatives.length === 0) {
+    representatives.push(...houseGovReps)
   }
 
-  // Return what we found, even if there were some API errors
+  // Return what we found
   if (representatives.length > 0) {
     return {
       representatives,
@@ -602,11 +868,11 @@ export async function lookupUSARepresentativeWithDetails(zipCode: string): Promi
     }
   }
 
-  // If we get here, nothing worked
+  // If we get here, we couldn't find any districts from APIs
   throw new Error(
-    `Network error: Unable to connect to representative APIs. ` +
-    `This may be due to CORS restrictions or network issues. ` +
-    `Please check your internet connection and try again. ` +
-    `API errors: ${apiErrors.length > 0 ? apiErrors.join('; ') : 'Unknown error'}`
+    `Unable to find representatives for ZIP code '${normalizedZip}'. ` +
+    `Could not determine congressional district from APIs. ` +
+    `API errors: ${apiErrors.length > 0 ? apiErrors.join('; ') : 'Unknown error'}. ` +
+    `Please verify the ZIP code is correct and try again.`
   )
 }
